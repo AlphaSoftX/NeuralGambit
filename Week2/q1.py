@@ -74,33 +74,42 @@ class History:
         return board
 
     def is_win(self):
-        # check if the board position is a win for either players
-        # Feel free to implement this in anyway if needed
-        pass
+        winList = [[0,1,2], [3,4,5], [6,7,8], [0,3,6], [1,4,7], [2,5,8], [0,4,8], [2,4,6]]
+        for l in winList:
+            if self.board[l[0]] != '0' and self.board[l[0]] == self.board[l[1]] == self.board[l[2]]:
+                return self.board[l[0]]
+        return False
 
     def is_draw(self):
-        # check if the board position is a draw
-        # Feel free to implement this in anyway if needed
-        pass
+        for i in self.board:
+            if i == '0':
+                return False
+        return True
 
     def get_valid_actions(self):
-        # get the empty squares from the board
-        # Feel free to implement this in anyway if needed
-        pass
+        rList = []
+        for i in range(len(self.board)):
+            if self.board[i] == '0':
+                rList.append(i)
+        return rList
 
     def is_terminal_history(self):
-        # check if the history is a terminal history
-        # Feel free to implement this in anyway if needed
-        pass
+        isWin = self.is_win()
+        if isWin != False:
+            return 1 if isWin == 'x' else -1
+        if self.is_draw():
+            return 0
+        return False
 
     def get_utility_given_terminal_history(self):
         # Feel free to implement this in anyway if needed
         pass
 
     def update_history(self, action):
-        # In case you need to create a deepcopy and update the history obj to get the next history object.
-        # Feel free to implement this in anyway if needed
-        pass
+        newHistory = self.history.copy()
+        newHistory.append(action)
+        return History(newHistory)
+
 
 
 def backward_induction(history_obj):
@@ -122,6 +131,37 @@ def backward_induction(history_obj):
     # actions. But since tictactoe is a PIEFG, there always exists an optimal deterministic strategy (SPNE). So your
     # policy will be something like this {"0": 1, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0, "6": 0, "7": 0, "8": 0} where
     # "0" was the one of the best actions for the current player/history.
+
+    result = history_obj.is_terminal_history()
+    if result is not False:
+        return result
+
+    historyStr = ''.join(str(num) for num in history_obj.history)
+    if history_obj.player == 'x':
+        max_val = -2
+        max_val_i = None
+        for i in history_obj.get_valid_actions():
+            val = backward_induction(history_obj.update_history(i))
+            if val > max_val:
+                max_val = val
+                max_val_i = i
+        strategy_dict_x[historyStr] = {'0': 0, '1': 0, '2': 0, '3': 0, '4': 0, '5': 0, '6': 0, '7': 0, '8':0}
+        strategy_dict_x[historyStr][str(max_val_i)] = 1
+        return max_val
+    
+    if history_obj.player == 'o':
+        min_val = 2
+        min_val_i = None
+        for i in history_obj.get_valid_actions():
+            val = backward_induction(history_obj.update_history(i))
+            if val < min_val:
+                min_val = val
+                min_val_i = i
+        strategy_dict_o[historyStr] = {'0': 0, '1': 0, '2': 0, '3': 0, '4': 0, '5': 0, '6': 0, '7': 0, '8':0}
+        strategy_dict_o[historyStr][str(min_val_i)] = 1
+        return min_val
+    
+    # I genuinely not know the reason of prewritten 'return -2' below
     return -2
     # TODO implement
 
