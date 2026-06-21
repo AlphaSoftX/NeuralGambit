@@ -1,0 +1,12 @@
+/books/
+# Polyglot link for /books/
+# https://github.com/michaeldv/donna_opening_books
+
+/build/
+/chess_engine
+# use `make` to /build/ and /chess_engine and
+# `make clean` to remove /build/ and /chess_engine
+
+/syzygy/
+# Syzygy 345(preferred) link for /syzygy/
+# https://chess.massimilianogoi.com/download/tablebases/
