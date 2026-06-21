@@ -73,6 +73,57 @@ namespace eval
       }
     }
 
+    // Files adjacent to/including the king's file, clamped to board edges.
+    inline int clampFile(int f) { return std::max(0, std::min(7, f)); }
+
+    // Counts how many of the 3 "shield" pawn squares directly in front of the
+    // king (on king file and the two adjacent files) are occupied by own pawns.
+    // Missing shield pawns = bigger danger.
+    int kingShieldPenalty(const Board &board, Color kingColor)
+    {
+      Square kingSq = board.kingSq(kingColor);
+      int kf = kingSq.index() % 8;
+      int kr = kingSq.index() / 8;
+
+      int missing = 0;
+      int dir = (kingColor == Color::WHITE) ? 1 : -1;
+      int shieldRank = kr + dir; // one rank in front of the king
+
+      if (shieldRank < 0 || shieldRank > 7)
+        return 0; // king on back rank edge case (shouldn't happen normally)
+
+      for (int f = clampFile(kf - 1); f <= clampFile(kf + 1); ++f)
+      {
+        Square sq(shieldRank * 8 + f);
+        Piece p = board.at(sq);
+        bool hasOwnPawn = (p.type() == PieceType::PAWN && p.color() == kingColor);
+        if (!hasOwnPawn)
+          ++missing;
+      }
+      return missing; // 0..3
+    }
+
+    // Count squares in the king's immediate
+    // surroundings that are attacked by the enemy. More attacked squares =
+    // more danger. Doesn't account for defenders, but correlates well with
+    // real attacking chances and costs one attack-lookup per square.
+    int kingAttackZonePressure(const Board &board, Color kingColor, Bitboard occ)
+    {
+      Square kingSq = board.kingSq(kingColor);
+      Color enemy = ~kingColor;
+
+      Bitboard zone = attacks::king(kingSq); // the 8 squares around the king
+      int attackedCount = 0;
+
+      while (zone)
+      {
+        Square sq = zone.pop();
+        if (board.isAttacked(sq, enemy))
+          ++attackedCount;
+      }
+      return attackedCount; // 0..8
+    }
+
   } // namespace
 
   int gamePhase(const Board &board)
@@ -218,6 +269,20 @@ namespace eval
       mg -= BISHOP_PAIR_MG;
       eg -= BISHOP_PAIR_EG;
     }
+
+    constexpr int SHIELD_PENALTY_MG = 12;
+    constexpr int ATTACK_ZONE_PENALTY_MG = 8;
+
+    int whiteShieldMissing = kingShieldPenalty(board, Color::WHITE);
+    int blackShieldMissing = kingShieldPenalty(board, Color::BLACK);
+    int whiteAttackZone = kingAttackZonePressure(board, Color::WHITE, occ);
+    int blackAttackZone = kingAttackZonePressure(board, Color::BLACK, occ);
+
+    int whiteKingDanger = whiteShieldMissing * SHIELD_PENALTY_MG + whiteAttackZone * ATTACK_ZONE_PENALTY_MG;
+    int blackKingDanger = blackShieldMissing * SHIELD_PENALTY_MG + blackAttackZone * ATTACK_ZONE_PENALTY_MG;
+
+    mg -= (whiteKingDanger * KING_SAFETY_MG_SCALE) / 100;
+    mg += (blackKingDanger * KING_SAFETY_MG_SCALE) / 100;
 
     // Tapered interpolation
 

@@ -16,6 +16,8 @@ namespace eval
   constexpr int QUEEN_VALUE = 900;
   constexpr int KING_VALUE = 0; // king safety handled separately, not material
 
+  constexpr int KING_SAFETY_MG_SCALE = 100; // tune later
+
   int materialValue(chess::PieceType pt);
 
   // Full static evaluation of the position, from side-to-move perspective.

@@ -50,6 +50,8 @@ namespace search
   namespace
   {
 
+    constexpr size_t MAX_MOVES = 218;
+
     // Fathom helper: build castling / EP arguments from the current board.
     // Extracted so both root probe and mid-search probe share the same logic.
 
@@ -74,8 +76,122 @@ namespace search
       return (ep == Square::NO_SQ) ? 0 : static_cast<unsigned>(ep.index());
     }
 
+    bool leastValuableAttacker(const Board &board, Color side, Square to,
+                               const Bitboard &occ, Square &outSq, PieceType &outType)
+    {
+      static constexpr PieceType::underlying order[] = {
+          PieceType::underlying::PAWN, PieceType::underlying::KNIGHT,
+          PieceType::underlying::BISHOP, PieceType::underlying::ROOK,
+          PieceType::underlying::QUEEN, PieceType::underlying::KING};
+
+      for (auto u : order)
+      {
+        Bitboard attackers;
+        switch (u)
+        {
+        case PieceType::underlying::PAWN:
+          attackers = attacks::pawn(~side, to) & board.pieces(PieceType::PAWN, side) & occ;
+          break;
+        case PieceType::underlying::KNIGHT:
+          attackers = attacks::knight(to) & board.pieces(PieceType::KNIGHT, side) & occ;
+          break;
+        case PieceType::underlying::BISHOP:
+          attackers = attacks::bishop(to, occ) & board.pieces(PieceType::BISHOP, side) & occ;
+          break;
+        case PieceType::underlying::ROOK:
+          attackers = attacks::rook(to, occ) & board.pieces(PieceType::ROOK, side) & occ;
+          break;
+        case PieceType::underlying::QUEEN:
+          attackers = attacks::queen(to, occ) & board.pieces(PieceType::QUEEN, side) & occ;
+          break;
+        default: // KING
+          attackers = attacks::king(to) & board.pieces(PieceType::KING, side) & occ;
+          break;
+        }
+
+        if (attackers.count() > 0)
+        {
+          outSq = Square(attackers.lsb());
+          outType = PieceType(u);
+          return true;
+        }
+      }
+      return false;
+    }
+
+    int see(const Board &board, const Move &m)
+    {
+      // Castling is encoded as "king moves to its own rook's square" — never
+      // a real capture, must not enter the exchange logic.
+      if (m.typeOf() == Move::CASTLING)
+        return 0;
+
+      Square to = m.to();
+      Square from = m.from();
+      Color mover = board.sideToMove();
+
+      Piece capturedPiece = board.at(to);
+      if (m.typeOf() == Move::ENPASSANT)
+        capturedPiece = Piece(PieceType::PAWN, ~mover);
+
+      if (capturedPiece == Piece::NONE)
+        return 0; // not a capture, SEE not applicable
+
+      Bitboard occ = board.occ();
+      occ.clear(from.index());
+
+      if (m.typeOf() == Move::ENPASSANT)
+      {
+        // The captured pawn is NOT on `to` for en passant — it's one rank
+        // behind, on the capturing pawn's starting rank.
+        int epPawnIdx = to.index() + (mover == Color::WHITE ? -8 : 8);
+        occ.clear(epPawnIdx);
+      }
+
+      // Value of the piece that ends up sitting on `to` after THIS move —
+      // for a promoting capture, that's the promoted piece, not the pawn.
+      PieceType movingResultType = (m.typeOf() == Move::PROMOTION)
+                                       ? m.promotionType()
+                                       : board.at(from).type();
+
+      constexpr int MAX_EXCHANGE = 32;
+      int gain[MAX_EXCHANGE];
+      PieceType onSquare[MAX_EXCHANGE]; // piece type currently sitting on `to`
+      int d = 0;
+
+      gain[0] = eval::materialValue(capturedPiece.type());
+      onSquare[0] = movingResultType;
+
+      Color side = ~mover; // opponent recaptures first
+
+      while (d + 1 < MAX_EXCHANGE)
+      {
+        Square lvaSq;
+        PieceType lvaType;
+        if (!leastValuableAttacker(board, side, to, occ, lvaSq, lvaType))
+          break;
+
+        ++d;
+        gain[d] = eval::materialValue(onSquare[d - 1]) - gain[d - 1];
+        onSquare[d] = lvaType;
+
+        occ.clear(lvaSq.index());
+        side = ~side;
+      }
+
+      // Fold the gain list back-to-front: each side stops the exchange early
+      // if continuing would be bad for them (standard minimax-over-list fold).
+      while (d > 0)
+      {
+        gain[d - 1] = -std::max(-gain[d - 1], gain[d]);
+        --d;
+      }
+
+      return gain[0];
+    }
+
     // Move scoring for ordering.
-    // Priority: TT move → winning captures (MVV-LVA) → en passant → killers → history.
+    // Priority: TT move → winning captures (SEE) → killers → history.
 
     int scoreMove(const Board &board, const Move &m, const Move &ttMove,
                   const Move killers[2], const int history[64][64])
@@ -83,15 +199,17 @@ namespace search
       if (m == ttMove)
         return 1'000'000;
 
-      if (m.typeOf() == Move::ENPASSANT)
-        return 100'000 + eval::PAWN_VALUE * 10 - eval::PAWN_VALUE;
+      bool isCapture = (m.typeOf() == Move::ENPASSANT) ||
+                       (m.typeOf() != Move::CASTLING && board.at(m.to()) != Piece::NONE);
 
-      Piece captured = (m.typeOf() != Move::CASTLING) ? board.at(m.to()) : Piece::NONE;
-      if (captured != Piece::NONE)
+      if (isCapture)
       {
-        int victimVal = eval::materialValue(captured.type());
-        int attackerVal = eval::materialValue(board.at(m.from()).type());
-        return 100'000 + victimVal * 10 - attackerVal;
+        int s = see(board, m);
+        // Good/equal captures: ordered above killers. Losing captures: ordered
+        // below killers/history so quiet moves with proven track records get
+        // tried first — but still searched eventually, never skipped here
+        // (only quiescence skips them outright).
+        return (s >= 0) ? (200'000 + s) : (1'000 + s);
       }
 
       if (m == killers[0])
@@ -105,11 +223,13 @@ namespace search
     void orderMoves(const Board &board, Movelist &moves, const Move &ttMove,
                     const Move killers[2], const int history[64][64])
     {
-      std::vector<int> scores(moves.size());
-      for (size_t i = 0; i < moves.size(); ++i)
+      std::array<int, MAX_MOVES> scores;
+      size_t n = moves.size();
+
+      for (size_t i = 0; i < n; ++i)
         scores[i] = scoreMove(board, moves[i], ttMove, killers, history);
 
-      for (size_t i = 1; i < moves.size(); ++i)
+      for (size_t i = 1; i < n; ++i)
       {
         int j = static_cast<int>(i);
         while (j > 0 && scores[j - 1] < scores[j])
@@ -131,23 +251,43 @@ namespace search
       if (ctx.stop)
         return 0;
 
+      // Hard safety cap — full-evasion search on checks can recurse deeper
+      // than capture-only qsearch ever could; don't run past array bounds.
+      if (ply >= MAX_PLY - 1)
+        return eval::evaluate(ctx.board);
+
       alpha = std::max(alpha, -MATE_SCORE + ply);
       beta = std::min(beta, MATE_SCORE - ply);
       if (alpha >= beta)
         return alpha;
 
-      int standPat = eval::evaluate(ctx.board);
-      if (standPat >= beta)
-        return beta;
-      if (standPat > alpha)
-        alpha = standPat;
+      const bool inCheck = ctx.board.inCheck();
+      int standPat = 0;
 
-      // Delta pruning: if even a free queen can't help, bail early.
-      if (standPat + eval::QUEEN_VALUE + 200 < alpha)
-        return alpha;
+      if (!inCheck)
+      {
+        standPat = eval::evaluate(ctx.board);
+        if (standPat >= beta)
+          return beta;
+        if (standPat > alpha)
+          alpha = standPat;
+
+        // Delta pruning: if even a free queen can't help, bail early.
+        if (standPat + eval::QUEEN_VALUE + 200 < alpha)
+          return alpha;
+      }
+
+      // If in check, no stand-pat: we MUST find a way out, so we search every
+      // legal evasion rather than assuming the static eval is trustworthy.
 
       Movelist moves;
-      movegen::legalmoves<movegen::MoveGenType::CAPTURE>(moves, ctx.board);
+      if (inCheck)
+        movegen::legalmoves(moves, ctx.board); // full evasions, not just captures
+      else
+        movegen::legalmoves<movegen::MoveGenType::CAPTURE>(moves, ctx.board);
+
+      if (inCheck && moves.empty())
+        return -MATE_SCORE + ply; // checkmate found inside qsearch
 
       int safeKillerPly = std::min(ply, MAX_PLY - 1);
       orderMoves(ctx.board, moves, Move::NO_MOVE,
@@ -156,6 +296,10 @@ namespace search
 
       for (const auto &m : moves)
       {
+
+        if (!inCheck && see(ctx.board, m) < 0)
+          continue;
+
         ctx.board.makeMove(m);
         int score = -quiescence(ctx, -beta, -alpha, ply + 1);
         ctx.board.unmakeMove(m);
@@ -168,6 +312,7 @@ namespace search
           alpha = score;
       }
 
+      // Not in check and no captures available: stand-pat alpha already set above.
       return alpha;
     }
 
@@ -293,7 +438,8 @@ namespace search
       const bool inCheck = ctx.board.inCheck();
 
       // Check extension
-      if (inCheck && extensions < 16){
+      if (inCheck && extensions < 16)
+      {
         ++depth;
         ++extensions;
       }
@@ -364,7 +510,7 @@ namespace search
         if (i == 0)
         {
           // First (and likely best) move: full-window search.
-          score = -alphaBeta(ctx, depth - 1, -beta, -alpha, ply + 1, extensions);
+          score = -alphaBeta(ctx, depth - 1, -beta, -alpha, ply + 1, true, extensions);
         }
         else
         {
@@ -379,11 +525,11 @@ namespace search
 
           // Zero-window (PVS) search at possibly reduced depth.
           score = -alphaBeta(ctx, depth - 1 - reduction, -alpha - 1, -alpha,
-                             ply + 1, extensions);
+                             ply + 1, true, extensions);
 
           // Re-search at full depth if LMR failed high or PV node surprised us.
           if (score > alpha && (reduction > 0 || isPV))
-            score = -alphaBeta(ctx, depth - 1, -beta, -alpha, ply + 1, extensions);
+            score = -alphaBeta(ctx, depth - 1, -beta, -alpha, ply + 1, true, extensions);
         }
 
         ctx.board.unmakeMove(m);
@@ -520,6 +666,17 @@ namespace search
 
     // Normal iterative deepening with aspiration windows
     Move bestMove = Move::NO_MOVE;
+
+    // Safety net: always have a legal move ready, even if depth 1 never
+    // finishes (e.g. movetime expires mid-search). Prevents "bestmove 0000"
+    // being sent, which GUIs treat as an illegal/forfeit move.
+    {
+      Movelist rootMoves;
+      movegen::legalmoves(rootMoves, ctx.board);
+      if (!rootMoves.empty())
+        bestMove = rootMoves[0];
+    }
+
     int prevScore = 0;
     int maxDepth = ctx.limits.depth > 0 ? ctx.limits.depth : MAX_PLY - 1;
 

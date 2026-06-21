@@ -25,8 +25,8 @@ namespace uci
     constexpr const char *ENGINE_NAME = "MyChessEngine";
     constexpr const char *ENGINE_AUTHOR = "Arun";
     constexpr int DEFAULT_HASH_MB = 64;
-    const std::string initBookPath = "";
-    const std::string initSyzygyPath = "syzygy";
+    const std::string initBookPath = ""; // books/komodo.bin
+    const std::string initSyzygyPath = ""; // syzygy
 
     struct EngineState
     {
@@ -36,7 +36,7 @@ namespace uci
       bool useBook = false;
       bool tbLoaded = false; // true after a successful tb_init()
       std::thread searchThread;
-      std::atomic<bool> *stopFlag = nullptr;
+      std::shared_ptr<search::SearchContext> activeCtx;
 
       EngineState()
       {
@@ -151,11 +151,11 @@ namespace uci
 
       if (state.searchThread.joinable())
       {
-        if (state.stopFlag)
-          state.stopFlag->store(true);
+        if (state.activeCtx)
+          state.activeCtx->stop.store(true);
         state.searchThread.join();
       }
-      state.stopFlag = nullptr;
+      state.activeCtx.reset();
 
       // Opening book — instant, no search needed.
       if (state.useBook && state.book.isLoaded())
@@ -173,7 +173,7 @@ namespace uci
       ctx->limits = limits;
       ctx->tt = &state.tt;
       ctx->tbLoaded = state.tbLoaded; // pass TB flag into the search context
-      state.stopFlag = &ctx->stop;
+      state.activeCtx = ctx;
 
       state.searchThread = std::thread([ctx]()
                                        { search::iterativeDeepening(*ctx); });
@@ -278,11 +278,11 @@ namespace uci
       }
       else if (cmd == "stop")
       {
-        if (state.stopFlag)
-          state.stopFlag->store(true);
+        if (state.activeCtx)
+          state.activeCtx->stop.store(true);
         if (state.searchThread.joinable())
           state.searchThread.join();
-        state.stopFlag = nullptr;
+        state.activeCtx.reset();
       }
       else if (cmd == "setoption")
       {
@@ -290,11 +290,11 @@ namespace uci
       }
       else if (cmd == "quit")
       {
-        if (state.stopFlag)
-          state.stopFlag->store(true);
+        if (state.activeCtx)
+          state.activeCtx->stop.store(true);
         if (state.searchThread.joinable())
           state.searchThread.join();
-        state.stopFlag = nullptr;
+        state.activeCtx.reset();
         tb_free(); // release Fathom memory before exit
         break;
       }
