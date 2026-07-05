@@ -25,8 +25,8 @@ namespace uci
     constexpr const char *ENGINE_NAME = "MyChessEngine";
     constexpr const char *ENGINE_AUTHOR = "Arun";
     constexpr int DEFAULT_HASH_MB = 64;
-    const std::string initBookPath = ""; // books/komodo.bin
-    const std::string initSyzygyPath = ""; // syzygy
+    const std::string initBookPath = "books/komodo.bin"; // books/komodo.bin
+    const std::string initSyzygyPath = "syzygy"; // syzygy
 
     struct EngineState
     {

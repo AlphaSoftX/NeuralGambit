@@ -44,6 +44,8 @@ namespace book
   // Computes the Polyglot-specific zobrist key for a position. This is
   // DIFFERENT from chess-library's internal hash() — Polyglot uses its own
   // fixed random table (Random64), so we recompute it independently.
+  // The table itself lives in zobrist_keys.hpp (verbatim Polyglot spec
+  // constants).
   uint64_t polyglotKey(const chess::Board &board);
 
   // Decodes a Polyglot-packed move into a chess-library Move, validated

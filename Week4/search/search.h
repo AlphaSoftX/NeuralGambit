@@ -39,6 +39,11 @@ namespace search
     chess::Move killers[MAX_PLY][2]{};
     int history[2][64][64]{};
 
+    // Countermove heuristic: indexed by [side-to-move-after-the-prev-move][prevFrom][prevTo],
+    // stores the quiet move that has refuted that previous move most recently.
+    // Tried as an extra move-ordering hint alongside killers/history.
+    chess::Move counterMoves[2][64][64]{};
+
     bool timeUp() const;
   };
 

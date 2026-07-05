@@ -3,6 +3,7 @@
 #include "../moveutils.h"
 #include "../fathom/tbprobe.h"
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <string>
 
@@ -28,7 +29,7 @@ namespace search
   int64_t allocateTime(const Limits &limits, Color us)
   {
     if (limits.movetime > 0)
-      return limits.movetime;
+      return limits.movetime - 250;
 
     int64_t myTime = (us == Color::WHITE) ? limits.wtime : limits.btime;
     int64_t myInc = (us == Color::WHITE) ? limits.winc : limits.binc;
@@ -191,10 +192,10 @@ namespace search
     }
 
     // Move scoring for ordering.
-    // Priority: TT move → winning captures (SEE) → killers → history.
+    // Priority: TT move → winning captures (SEE) → killers → countermove → history.
 
     int scoreMove(const Board &board, const Move &m, const Move &ttMove,
-                  const Move killers[2], const int history[64][64])
+                  const Move killers[2], const Move &counterMove, const int history[64][64])
     {
       if (m == ttMove)
         return 1'000'000;
@@ -217,17 +218,24 @@ namespace search
       if (m == killers[1])
         return 80'000;
 
+      // Countermove: the quiet move that most recently refuted the
+      // opponent's last move at any node, regardless of position. Cheaper
+      // signal than killers (not position-specific) but complements them
+      // well — slotted just below killers, above plain history.
+      if (counterMove != Move::NO_MOVE && m == counterMove)
+        return 70'000;
+
       return history[m.from().index()][m.to().index()];
     }
 
     void orderMoves(const Board &board, Movelist &moves, const Move &ttMove,
-                    const Move killers[2], const int history[64][64])
+                    const Move killers[2], const Move &counterMove, const int history[64][64])
     {
       std::array<int, MAX_MOVES> scores;
       size_t n = moves.size();
 
       for (size_t i = 0; i < n; ++i)
-        scores[i] = scoreMove(board, moves[i], ttMove, killers, history);
+        scores[i] = scoreMove(board, moves[i], ttMove, killers, counterMove, history);
 
       for (size_t i = 1; i < n; ++i)
       {
@@ -249,6 +257,12 @@ namespace search
       if ((ctx.nodes & 2047) == 0 && ctx.timeUp())
         ctx.stop = true;
       if (ctx.stop)
+        return 0;
+
+      // Draw detection — qsearch can run many plies deep during long forcing
+      // sequences (perpetual checks, repeated captures), so without this it
+      // can return a stale eval instead of correctly recognizing a draw.
+      if (ctx.board.isRepetition(2) || ctx.board.isHalfMoveDraw() || ctx.board.isInsufficientMaterial())
         return 0;
 
       // Hard safety cap — full-evasion search on checks can recurse deeper
@@ -291,7 +305,7 @@ namespace search
 
       int safeKillerPly = std::min(ply, MAX_PLY - 1);
       orderMoves(ctx.board, moves, Move::NO_MOVE,
-                 ctx.killers[safeKillerPly],
+                 ctx.killers[safeKillerPly], Move::NO_MOVE,
                  ctx.history[static_cast<int>(ctx.board.sideToMove())]);
 
       for (const auto &m : moves)
@@ -328,7 +342,7 @@ namespace search
     //   - LMR (late move reductions)
 
     int alphaBeta(SearchContext &ctx, int depth, int alpha, int beta, int ply,
-                  bool nullMoveAllowed = true, int extensions = 0)
+                  bool nullMoveAllowed = true, int extensions = 0, chess::Move prevMove = chess::Move::NO_MOVE)
     {
       ++ctx.nodes;
       if ((ctx.nodes & 2047) == 0 && ctx.timeUp())
@@ -444,6 +458,48 @@ namespace search
         ++extensions;
       }
 
+      // Static eval, computed once and reused by RFP / razoring / futility /
+      // IIR below. Only meaningful when not in check.
+      int staticEval = inCheck ? 0 : eval::evaluate(ctx.board);
+
+      // Reverse futility pruning (a.k.a. static null move pruning).
+      // If our static eval is already far above beta, assume a real search
+      // would also fail high and cut immediately — cheap and one of the
+      // highest-value low-depth pruning techniques.
+      constexpr int RFP_MARGIN_PER_DEPTH = 80;
+      constexpr int RFP_MAX_DEPTH = 7;
+      if (!inCheck && !isPV && !isRoot && depth <= RFP_MAX_DEPTH &&
+          std::abs(beta) < MATE_SCORE - MAX_PLY)
+      {
+        int margin = RFP_MARGIN_PER_DEPTH * depth;
+        if (staticEval - margin >= beta)
+          return staticEval - margin;
+      }
+
+      // Razoring: at shallow depth, if static eval is far below alpha, the
+      // position is probably lost for quiet improvement — drop straight
+      // into quiescence rather than spending a full node on it.
+      constexpr int RAZOR_MARGIN_PER_DEPTH = 250;
+      constexpr int RAZOR_MAX_DEPTH = 3;
+      if (!inCheck && !isPV && !isRoot && depth <= RAZOR_MAX_DEPTH)
+      {
+        int margin = RAZOR_MARGIN_PER_DEPTH * depth;
+        if (staticEval + margin <= alpha)
+        {
+          int razorScore = quiescence(ctx, alpha, beta, ply);
+          if (razorScore <= alpha)
+            return razorScore;
+        }
+      }
+
+      // Internal iterative reduction: with no TT move to guide ordering at
+      // a meaningful depth, the first move searched is likely to be poorly
+      // chosen. Shave a ply off rather than spending a full-depth search on
+      // an unverified first move — cheap and self-correcting since the TT
+      // fills in on subsequent visits.
+      if (!ttHit && !inCheck && depth >= 4)
+        --depth;
+
       // Null-move pruning
       if (!inCheck && !isPV && nullMoveAllowed && depth >= 3 && !isRoot)
       {
@@ -469,7 +525,6 @@ namespace search
       bool canFutilityPrune = false;
       if (!inCheck && !isPV && depth <= 3)
       {
-        int staticEval = eval::evaluate(ctx.board);
         if (staticEval + FUTILITY_MARGIN[depth] <= alpha)
           canFutilityPrune = true;
       }
@@ -484,13 +539,27 @@ namespace search
       int safeKillerPly = std::min(ply, MAX_PLY - 1);
       Color us = ctx.board.sideToMove(); // capture BEFORE any makeMove
 
+      // Countermove lookup: indexed by the side that's about to move (us)
+      // and the from/to of the opponent's move that led to this node.
+      Move counterMove = Move::NO_MOVE;
+      if (prevMove != Move::NO_MOVE)
+        counterMove = ctx.counterMoves[static_cast<int>(us)][prevMove.from().index()][prevMove.to().index()];
+
       orderMoves(ctx.board, moves, ttMove,
-                 ctx.killers[safeKillerPly],
+                 ctx.killers[safeKillerPly], counterMove,
                  ctx.history[static_cast<int>(us)]);
 
       int origAlpha = alpha;
       Move bestMove = moves[0];
       int bestScore = -INF;
+
+      // Tracks quiet moves tried this node so far (that did NOT cause a
+      // cutoff) so that, if a later move DOES cause a cutoff, we can apply
+      // a small history malus to all of them. This sharpens move ordering
+      // over time: moves that are repeatedly tried-and-failed sink in
+      // priority, not just moves that succeed rising.
+      std::array<Move, MAX_MOVES> quietsTried;
+      int quietsTriedCount = 0;
 
       for (size_t i = 0; i < moves.size(); ++i)
       {
@@ -510,26 +579,43 @@ namespace search
         if (i == 0)
         {
           // First (and likely best) move: full-window search.
-          score = -alphaBeta(ctx, depth - 1, -beta, -alpha, ply + 1, true, extensions);
+          // NOTE: previously this call passed `extensions` positionally
+          // into the `nullMoveAllowed` slot (the bool parameter that
+          // precedes `extensions`), silently resetting the check-extension
+          // counter for the rest of this subtree. Fixed by passing both
+          // explicitly.
+          score = -alphaBeta(ctx, depth - 1, -beta, -alpha, ply + 1, true, extensions, m);
         }
         else
         {
-          // LMR: reduce depth for later quiet moves.
+          // LMR: reduce depth for later, less-promising moves. Reduction
+          // grows smoothly with both depth and move index (standard
+          // log-log formula, same shape used by most modern engines) rather
+          // than a flat +1/+2 step — this lets us search deep move lists
+          // without paying full price for moves that are usually pruned
+          // anyway, while still examining every move at some depth.
           int reduction = 0;
-          if (depth >= 3 && i >= 4 && !isCapture && !isPromotion && !inCheck && !givesCheck)
+          if (depth >= 2 && i >= 1 && !isCapture && !isPromotion && !inCheck && !givesCheck)
           {
-            reduction = 1;
-            if (i >= 8)
-              ++reduction;
+            double lr = 0.4 + std::log(static_cast<double>(depth)) *
+                                   std::log(static_cast<double>(i + 1)) / 2.0;
+            reduction = static_cast<int>(lr);
+
+            // PV nodes get reduced less aggressively — they're more likely
+            // to matter for the final line.
+            if (isPV && reduction > 0)
+              --reduction;
+
+            reduction = std::max(0, std::min(reduction, depth - 1));
           }
 
           // Zero-window (PVS) search at possibly reduced depth.
           score = -alphaBeta(ctx, depth - 1 - reduction, -alpha - 1, -alpha,
-                             ply + 1, true, extensions);
+                             ply + 1, true, extensions, m);
 
           // Re-search at full depth if LMR failed high or PV node surprised us.
           if (score > alpha && (reduction > 0 || isPV))
-            score = -alphaBeta(ctx, depth - 1, -beta, -alpha, ply + 1, true, extensions);
+            score = -alphaBeta(ctx, depth - 1, -beta, -alpha, ply + 1, true, extensions, m);
         }
 
         ctx.board.unmakeMove(m);
@@ -547,19 +633,43 @@ namespace search
 
         if (alpha >= beta)
         {
-          // Beta cutoff — update killer and history for quiet moves.
+          // Beta cutoff — update killer, countermove, and history for
+          // quiet moves.
           if (!isCapture && !isPromotion)
           {
             ctx.killers[safeKillerPly][1] = ctx.killers[safeKillerPly][0];
             ctx.killers[safeKillerPly][0] = m;
+
+            if (prevMove != Move::NO_MOVE)
+              ctx.counterMoves[static_cast<int>(us)][prevMove.from().index()][prevMove.to().index()] = m;
+
             int &h = ctx.history[static_cast<int>(us)]
                                 [m.from().index()][m.to().index()];
             h += depth * depth;
             if (h > 30'000)
               h = 30'000; // prevent overflow in long games
+
+            // History malus: every quiet move tried earlier at this node
+            // that did NOT cause a cutoff gets a small penalty, since it
+            // was searched and rejected in favor of this one. Keeps the
+            // history table honest about moves that look tempting by
+            // position but don't actually hold up.
+            for (int qi = 0; qi < quietsTriedCount; ++qi)
+            {
+              const Move &qm = quietsTried[qi];
+              int &hq = ctx.history[static_cast<int>(us)][qm.from().index()][qm.to().index()];
+              hq -= depth * depth / 2;
+              if (hq < -30'000)
+                hq = -30'000;
+            }
           }
           break;
         }
+
+        // No cutoff this move: if it was quiet, remember it for the malus
+        // pass above in case a later move causes a cutoff.
+        if (!isCapture && !isPromotion && quietsTriedCount < static_cast<int>(MAX_MOVES))
+          quietsTried[quietsTriedCount++] = m;
       }
 
       TTFlag flag = (bestScore <= origAlpha) ? TTFlag::UPPERBOUND

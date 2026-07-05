@@ -124,6 +124,215 @@ namespace eval
       return attackedCount; // 0..8
     }
 
+    // --- Pawn structure -----------------------------------------------
+    //
+    // All of the following operate on raw pawn bitboards (one per color)
+    // and are intentionally cheap: a handful of bitboard ANDs per pawn,
+    // no per-square loops beyond the pawns that actually exist.
+
+    // Passed pawn bonus, indexed by rank from the pawn's own side
+    // (rank 0 = own 2nd rank ... rank 6 = about to promote). Tapered
+    // mg/eg like everything else; passed pawns matter far more in the
+    // endgame, hence the eg table being much steeper.
+    constexpr int PASSED_PAWN_MG[7] = {0, 5, 10, 20, 35, 60, 100};
+    constexpr int PASSED_PAWN_EG[7] = {0, 10, 20, 40, 70, 120, 200};
+
+    constexpr int ISOLATED_PAWN_MG = -10;
+    constexpr int ISOLATED_PAWN_EG = -20;
+
+    constexpr int DOUBLED_PAWN_MG = -8;
+    constexpr int DOUBLED_PAWN_EG = -16;
+
+    constexpr int BACKWARD_PAWN_MG = -6;
+    constexpr int BACKWARD_PAWN_EG = -10;
+
+    constexpr int ROOK_OPEN_FILE_MG = 20;
+    constexpr int ROOK_OPEN_FILE_EG = 10;
+    constexpr int ROOK_SEMI_OPEN_FILE_MG = 10;
+    constexpr int ROOK_SEMI_OPEN_FILE_EG = 5;
+
+    // Precomputes, for a given file index 0..7, the bitboard mask of that
+    // file plus its two neighbors (clamped at the board edge). Used for
+    // isolated-pawn and passed-pawn front-span checks.
+    inline Bitboard adjacentFilesMask(int file)
+    {
+      Bitboard mask = attacks::MASK_FILE[file];
+      if (file > 0)
+        mask |= attacks::MASK_FILE[file - 1];
+      if (file < 7)
+        mask |= attacks::MASK_FILE[file + 1];
+      return mask;
+    }
+
+    // The set of squares in front of `sq` (toward promotion) on the given
+    // file, used for doubled-pawn and passed-pawn detection.
+    inline Bitboard fileInFront(Square sq, Color side)
+    {
+      int file = sq.index() % 8;
+      int rank = sq.index() / 8;
+      Bitboard mask = attacks::MASK_FILE[file];
+
+      if (side == Color::WHITE)
+      {
+        for (int r = 0; r <= rank; ++r)
+          mask &= ~attacks::MASK_RANK[r];
+      }
+      else
+      {
+        for (int r = rank; r <= 7; ++r)
+          mask &= ~attacks::MASK_RANK[r];
+      }
+      return mask;
+    }
+
+    // The "passed pawn span": own file + adjacent files, all ranks ahead
+    // of the pawn. If no enemy pawn occupies this span, the pawn is passed.
+    inline Bitboard passedPawnSpan(Square sq, Color side)
+    {
+      int file = sq.index() % 8;
+      int rank = sq.index() / 8;
+      Bitboard mask = adjacentFilesMask(file);
+
+      if (side == Color::WHITE)
+      {
+        for (int r = 0; r <= rank; ++r)
+          mask &= ~attacks::MASK_RANK[r];
+      }
+      else
+      {
+        for (int r = rank; r <= 7; ++r)
+          mask &= ~attacks::MASK_RANK[r];
+      }
+      return mask;
+    }
+
+    struct PawnStructureScore
+    {
+      int mg = 0;
+      int eg = 0;
+    };
+
+    // Evaluates passed/isolated/doubled/backward pawns for one side.
+    // `ownPawns`/`enemyPawns` are full-board bitboards (not masked to a file).
+    PawnStructureScore evaluatePawnsForSide(Bitboard ownPawns, Bitboard enemyPawns, Color side)
+    {
+      PawnStructureScore s;
+
+      Bitboard pawns = ownPawns;
+      while (pawns)
+      {
+        Square sq = pawns.pop();
+        int file = sq.index() % 8;
+        int rank = sq.index() / 8;
+
+        // Doubled: another own pawn further back on the same file behind
+        // this one isn't counted twice — we simply check if there is any
+        // other own pawn anywhere else on this file.
+        Bitboard sameFileOthers = (ownPawns & attacks::MASK_FILE[file]);
+        sameFileOthers.clear(sq.index());
+        if (!sameFileOthers.empty())
+        {
+          s.mg += DOUBLED_PAWN_MG;
+          s.eg += DOUBLED_PAWN_EG;
+        }
+
+        // Isolated: no own pawns on adjacent files at all.
+        Bitboard neighborFiles;
+        if (file > 0)
+          neighborFiles |= attacks::MASK_FILE[file - 1];
+        if (file < 7)
+          neighborFiles |= attacks::MASK_FILE[file + 1];
+        bool isolated = (ownPawns & neighborFiles).empty();
+        if (isolated)
+        {
+          s.mg += ISOLATED_PAWN_MG;
+          s.eg += ISOLATED_PAWN_EG;
+        }
+
+        // Passed: no enemy pawns in the passed-pawn span ahead of us.
+        bool passed = (enemyPawns & passedPawnSpan(sq, side)).empty();
+        if (passed)
+        {
+          int rankFromOwnSide = (side == Color::WHITE) ? rank : (7 - rank);
+          rankFromOwnSide = std::max(0, std::min(6, rankFromOwnSide));
+          s.mg += PASSED_PAWN_MG[rankFromOwnSide];
+          s.eg += PASSED_PAWN_EG[rankFromOwnSide];
+        }
+
+        // Backward: not isolated, but the pawn can't be supported by a
+        // friendly pawn pushing up beside it (no own pawn on an adjacent
+        // file at the same rank or behind), AND its stop square is covered
+        // by an enemy pawn — a standard, cheap backward-pawn proxy.
+        if (!isolated && !passed)
+        {
+          Bitboard behindOrLevelMask;
+          if (side == Color::WHITE)
+          {
+            for (int r = 0; r <= rank; ++r)
+              behindOrLevelMask |= attacks::MASK_RANK[r];
+          }
+          else
+          {
+            for (int r = rank; r <= 7; ++r)
+              behindOrLevelMask |= attacks::MASK_RANK[r];
+          }
+          if (file > 0)
+            behindOrLevelMask &= (attacks::MASK_FILE[file - 1] | attacks::MASK_FILE[std::min(7, file + 1)]);
+          else
+            behindOrLevelMask &= attacks::MASK_FILE[file + 1];
+
+          bool hasSupportPawn = !(ownPawns & behindOrLevelMask).empty();
+
+          if (!hasSupportPawn)
+          {
+            int stopRank = rank + (side == Color::WHITE ? 1 : -1);
+            if (stopRank >= 0 && stopRank <= 7)
+            {
+              Square stopSq(stopRank * 8 + file);
+              Bitboard enemyPawnAttackers = attacks::pawn(side, stopSq) & enemyPawns;
+              if (!enemyPawnAttackers.empty())
+              {
+                s.mg += BACKWARD_PAWN_MG;
+                s.eg += BACKWARD_PAWN_EG;
+              }
+            }
+          }
+        }
+      }
+
+      return s;
+    }
+
+    // Rook file bonuses: open file (no pawns of either color) is worth more
+    // than semi-open (no own pawns, but enemy pawns remain).
+    int rookFileBonusMg(Square sq, Bitboard ownPawns, Bitboard enemyPawns)
+    {
+      int file = sq.index() % 8;
+      Bitboard fileMask = attacks::MASK_FILE[file];
+      bool ownPawnOnFile = !(ownPawns & fileMask).empty();
+      bool enemyPawnOnFile = !(enemyPawns & fileMask).empty();
+
+      if (!ownPawnOnFile && !enemyPawnOnFile)
+        return ROOK_OPEN_FILE_MG;
+      if (!ownPawnOnFile && enemyPawnOnFile)
+        return ROOK_SEMI_OPEN_FILE_MG;
+      return 0;
+    }
+
+    int rookFileBonusEg(Square sq, Bitboard ownPawns, Bitboard enemyPawns)
+    {
+      int file = sq.index() % 8;
+      Bitboard fileMask = attacks::MASK_FILE[file];
+      bool ownPawnOnFile = !(ownPawns & fileMask).empty();
+      bool enemyPawnOnFile = !(enemyPawns & fileMask).empty();
+
+      if (!ownPawnOnFile && !enemyPawnOnFile)
+        return ROOK_OPEN_FILE_EG;
+      if (!ownPawnOnFile && enemyPawnOnFile)
+        return ROOK_SEMI_OPEN_FILE_EG;
+      return 0;
+    }
+
   } // namespace
 
   int gamePhase(const Board &board)
@@ -228,6 +437,12 @@ namespace eval
 
         mgVal += mobility * ROOK_MOBILITY_MG;
         egVal += mobility * ROOK_MOBILITY_EG;
+
+        // Open / semi-open file bonus.
+        Bitboard ownPawnsBB = board.pieces(PieceType::PAWN, p.color());
+        Bitboard enemyPawnsBB = board.pieces(PieceType::PAWN, ~p.color());
+        mgVal += rookFileBonusMg(static_cast<Square>(sq), ownPawnsBB, enemyPawnsBB);
+        egVal += rookFileBonusEg(static_cast<Square>(sq), ownPawnsBB, enemyPawnsBB);
       }
 
       else if (pt == PieceType::QUEEN)
@@ -268,6 +483,18 @@ namespace eval
     {
       mg -= BISHOP_PAIR_MG;
       eg -= BISHOP_PAIR_EG;
+    }
+
+    // Pawn structure: passed / isolated / doubled / backward pawns.
+    {
+      Bitboard whitePawns = board.pieces(PieceType::PAWN, Color::WHITE);
+      Bitboard blackPawns = board.pieces(PieceType::PAWN, Color::BLACK);
+
+      PawnStructureScore whiteScore = evaluatePawnsForSide(whitePawns, blackPawns, Color::WHITE);
+      PawnStructureScore blackScore = evaluatePawnsForSide(blackPawns, whitePawns, Color::BLACK);
+
+      mg += whiteScore.mg - blackScore.mg;
+      eg += whiteScore.eg - blackScore.eg;
     }
 
     constexpr int SHIELD_PENALTY_MG = 12;

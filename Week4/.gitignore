@@ -10,3 +10,7 @@
 /syzygy/
 # Syzygy 345(preferred) link for /syzygy/
 # https://chess.massimilianogoi.com/download/tablebases/
+
+# testing files excluded
+/test.cpp
+/test

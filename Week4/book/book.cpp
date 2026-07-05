@@ -1,15 +1,13 @@
 #include "book.h"
+#include "zobrist_keys.hpp"
 #include <fstream>
 #include <algorithm>
 #include <random>
-#include <array>
 
 using namespace chess;
 
-// Polyglot's Random64[781] table is generated deterministically from
-// MT19937 seeded with 1 (this is how the original `polyglot` book tool by
-// Fabien Letouzey produces it). We regenerate it here rather than hardcode
-// 781 magic numbers, so the source stays auditable.
+// The Random64[781] table used to compute Polyglot zobrist keys now lives in
+// zobrist_keys.hpp as the literal, verbatim spec constants
 //
 // Index layout (standard Polyglot spec):
 //   [0..767]   piece-on-square keys: index = 64 * pieceCode + square
@@ -17,62 +15,30 @@ using namespace chess;
 //                         8=BQ 9=WQ 10=BK 11=WK
 //   [768..771] castling rights: 768=WK-side 769=WQ-side 770=BK-side 771=BQ-side
 //   [772..779] en-passant file (a..h), only XORed in if an EP capture is
-//              actually possible for the side to move
+//              actually possible for the side to move (pawn adjacency only —
+//              legality/pins are irrelevant per spec)
 //   [780]      side-to-move key, XORed in only when White is to move
 
 namespace
 {
 
-  std::array<uint64_t, 781> buildRandom64()
-  {
-    std::array<uint64_t, 781> table{};
-    std::mt19937 mt(1); // seed 1, matches Polyglot's init_genrand(1)
-    for (auto &v : table)
-    {
-      uint64_t hi = mt();
-      uint64_t lo = mt();
-      v = (hi << 32) | lo;
-    }
-    return table;
-  }
-
-  const std::array<uint64_t, 781> &random64()
-  {
-    static const std::array<uint64_t, 781> table = buildRandom64();
-    return table;
-  }
-
   int pieceCode(Piece p)
   {
-    // Returns 0..11 per the layout above, or -1 if empty.
-    if (p == Piece::NONE)
-      return -1;
-    static constexpr int base[6] = {0, 2, 4, 6, 8, 10}; // P N B R Q K
-    int typeIdx;
+    int code = 0;
     switch (p.type().internal())
     {
-    case PieceType::underlying::PAWN:
-      typeIdx = 0;
-      break;
-    case PieceType::underlying::KNIGHT:
-      typeIdx = 1;
-      break;
-    case PieceType::underlying::BISHOP:
-      typeIdx = 2;
-      break;
-    case PieceType::underlying::ROOK:
-      typeIdx = 3;
-      break;
-    case PieceType::underlying::QUEEN:
-      typeIdx = 4;
-      break;
-    default:
-      typeIdx = 5;
-      break; // KING
+      case PieceType::underlying::PAWN:   code = 0;  break;
+      case PieceType::underlying::KNIGHT: code = 2;  break;
+      case PieceType::underlying::BISHOP: code = 4;  break;
+      case PieceType::underlying::ROOK:   code = 6;  break;
+      case PieceType::underlying::QUEEN:  code = 8;  break;
+      case PieceType::underlying::KING:   code = 10; break;
+      default:                            return -1; // Catches NONE or unexpected types safely
     }
-    int code = base[typeIdx];
+
     if (p.color() == Color::WHITE)
       code += 1;
+        
     return code;
   }
 
@@ -83,7 +49,7 @@ namespace book
 
   uint64_t polyglotKey(const Board &board)
   {
-    const auto &R = random64();
+    const auto &R = zobrist::POLYGLOT_RANDOM64;
     uint64_t key = 0;
 
     for (int sq = 0; sq < 64; ++sq)
@@ -158,7 +124,7 @@ namespace book
         case 3:
           promoType = PieceType::ROOK;
           break;
-        default:
+        case 4:
           promoType = PieceType::QUEEN;
           break;
         }
@@ -167,7 +133,7 @@ namespace book
       }
     }
 
-    // Handle the castling "king takes own rook" encoding explicitly if the
+    // Handle the castling "king not takes own rook" encoding explicitly if the
     // direct from/to scan above didn't match (some books encode it that way).
     for (const auto &m : legal)
     {
