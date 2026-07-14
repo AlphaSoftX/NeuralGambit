@@ -42,7 +42,7 @@ namespace moveutils
       case chess::PieceType::underlying::ROOK:
         s += 'r';
         break;
-      default:
+      case chess::PieceType::underlying::QUEEN:
         s += 'q';
         break;
       }

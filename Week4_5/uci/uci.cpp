@@ -48,7 +48,7 @@ namespace uci
         {
           tbLoaded = tb_init(initSyzygyPath.c_str());
         }
-        std::cout << "info string loaded deps: " << useBook << " " << tbLoaded << std::endl;
+        std::cerr << "info string loaded deps: " << useBook << " " << tbLoaded << std::endl;
       }
     };
 
@@ -211,25 +211,16 @@ namespace uci
         {
         }
       }
-      else if (name == "OwnBook")
-      {
-        state.useBook = (value == "true");
-      }
       else if (name == "BookFile")
       {
-        state.book.load(value);
+        state.useBook = value.empty() ? false: state.book.load(value);
+        std::cerr << "info string loaded book: " << state.useBook << std::endl;
       }
       else if (name == "SyzygyPath")
       {
-        // tb_init() returns true on success; TB_LARGEST tells us the
-        // maximum piece count of the TBs that were found.
-        state.tbLoaded = tb_init(value.c_str());
-        if (!state.tbLoaded)
-          std::cerr << "info string Failed to load Syzygy TBs from: "
-                    << value << std::endl;
-        else
-          std::cerr << "info string Syzygy TBs loaded. Largest: "
-                    << TB_LARGEST << " pieces." << std::endl;
+        tb_free(); // safety measure against memory leak
+        state.tbLoaded = value.empty() ? false: tb_init(value.c_str());
+        std::cerr << "info string loaded syzygy: " << state.tbLoaded << std::endl;
       }
     }
 
@@ -254,9 +245,8 @@ namespace uci
                   << "id author " << ENGINE_AUTHOR << "\n"
                   << "option name Hash type spin default "
                   << DEFAULT_HASH_MB << " min 1 max 2048\n"
-                  << "option name OwnBook type check default " << (initBookPath.empty() ? "false" : "true") << "\n"
-                  << "option name BookFile type string default " << (initBookPath.empty() ? "<empty>" : initBookPath) << "\n"
-                  << "option name SyzygyPath type string default " << (initSyzygyPath.empty() ? "<empty>" : initSyzygyPath) << "\n"
+                  << "option name BookFile type string default " << (initBookPath.empty() ? "" : initBookPath) << "\n"
+                  << "option name SyzygyPath type string default " << (initSyzygyPath.empty() ? "" : initSyzygyPath) << "\n"
                   << "uciok" << std::endl;
       }
       else if (cmd == "isready")

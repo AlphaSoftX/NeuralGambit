@@ -6,18 +6,8 @@
 
 using namespace chess;
 
-// The Random64[781] table used to compute Polyglot zobrist keys now lives in
+// The Random64[781] table used to compute Polyglot zobrist keys lives in
 // zobrist_keys.hpp as the literal, verbatim spec constants
-//
-// Index layout (standard Polyglot spec):
-//   [0..767]   piece-on-square keys: index = 64 * pieceCode + square
-//              pieceCode: 0=BP 1=WP 2=BN 3=WN 4=BB 5=WB 6=BR 7=WR
-//                         8=BQ 9=WQ 10=BK 11=WK
-//   [768..771] castling rights: 768=WK-side 769=WQ-side 770=BK-side 771=BQ-side
-//   [772..779] en-passant file (a..h), only XORed in if an EP capture is
-//              actually possible for the side to move (pawn adjacency only —
-//              legality/pins are irrelevant per spec)
-//   [780]      side-to-move key, XORed in only when White is to move
 
 namespace
 {
