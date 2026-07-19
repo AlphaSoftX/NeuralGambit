@@ -1,0 +1,14 @@
+# folder for storing raw data files from lichess
+/data/
+
+# HalfKP data storage along with positions for train, test and validation data
+/nnue_data/
+
+# latest run's resulting weights and other metadata
+/checkpoints/
+
+# to save old runs weights and metadata
+/old_runs/
+
+# results of training, commented for now to be able to upload final result
+# /build/
