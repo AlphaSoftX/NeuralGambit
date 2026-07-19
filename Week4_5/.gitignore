@@ -9,7 +9,7 @@
 
 /syzygy/
 # Syzygy 345(preferred) link for /syzygy/
-# https://chess.massimilianogoi.com/download/tablebases/
+# http://tablebase.sesse.net/syzygy/3-4-5/
 
 # testing files excluded
 /test.cpp

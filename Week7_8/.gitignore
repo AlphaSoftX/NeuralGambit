@@ -1,0 +1,16 @@
+/books/
+# Polyglot link for /books/
+# https://github.com/michaeldv/donna_opening_books
+
+/build/
+/chess_engine
+# use `make` to create /build/ and /chess_engine and
+# `make clean` to remove /build/ and /chess_engine
+
+/syzygy/
+# Syzygy 345(preferred) link for /syzygy/
+# http://tablebase.sesse.net/syzygy/3-4-5/
+
+# testing files excluded
+/test.cpp
+/test
